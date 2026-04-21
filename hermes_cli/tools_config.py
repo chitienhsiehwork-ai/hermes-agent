@@ -79,13 +79,24 @@ def _get_effective_configurable_toolsets():
     """Return CONFIGURABLE_TOOLSETS + any plugin-provided toolsets.
 
     Plugin toolsets are appended at the end so they appear after the
-    built-in toolsets in the TUI checklist.
+    built-in toolsets in the TUI checklist. Plugin rows whose key
+    collides with a built-in (e.g. a plugin that registers tools into
+    the existing ``web`` toolset) are dropped so the UI shows a single
+    authoritative row per toolset key. The built-in entry is the source
+    of truth for that key's label and config panel; additional plugin
+    tools registered under the same key still run at agent time, they
+    just no longer produce a duplicate ``hermes tools`` row that maps
+    back to the same config surface (#13640).
     """
     result = list(CONFIGURABLE_TOOLSETS)
+    builtin_keys = {ts_key for ts_key, _, _ in CONFIGURABLE_TOOLSETS}
     try:
         from hermes_cli.plugins import discover_plugins, get_plugin_toolsets
         discover_plugins()  # idempotent — ensures plugins are loaded
-        result.extend(get_plugin_toolsets())
+        for entry in get_plugin_toolsets():
+            if entry[0] in builtin_keys:
+                continue
+            result.append(entry)
     except Exception:
         pass
     return result

@@ -6,6 +6,7 @@ from hermes_cli.tools_config import (
     _DEFAULT_OFF_TOOLSETS,
     _apply_toolset_change,
     _configure_provider,
+    _get_effective_configurable_toolsets,
     _get_platform_tools,
     _platform_toolset_summary,
     _save_platform_tools,
@@ -601,3 +602,63 @@ class TestImagegenModelPicker:
             _configure_imagegen_model("fal", config)
         assert isinstance(config["image_gen"], dict)
         assert config["image_gen"]["model"] == "fal-ai/flux-2/klein/9b"
+
+
+class TestEffectiveConfigurableToolsetsDedup:
+    """Regression coverage for #13640.
+
+    Plugin toolsets whose key collides with a built-in (e.g. a plugin
+    that extends the ``web`` toolset) must not produce a second ``hermes
+    tools`` row — both rows route to the same config surface, so the UI
+    is misleading and toggling one mutates the other's state.
+    """
+
+    def _with_plugin_toolsets(self, entries):
+        return patch.multiple(
+            "hermes_cli.plugins",
+            discover_plugins=lambda: None,
+            get_plugin_toolsets=lambda: entries,
+        )
+
+    def test_dedupes_plugin_row_that_collides_with_builtin(self):
+        with self._with_plugin_toolsets([("web", "🔌 Web Search Plus", "plugin web tools")]):
+            result = _get_effective_configurable_toolsets()
+
+        web_rows = [row for row in result if row[0] == "web"]
+        assert len(web_rows) == 1
+        # Built-in entry wins — label and description come from CONFIGURABLE_TOOLSETS.
+        builtin_web = next(row for row in CONFIGURABLE_TOOLSETS if row[0] == "web")
+        assert web_rows[0] == builtin_web
+
+    def test_keeps_plugin_row_with_unique_key(self):
+        entries = [("custom_plugin_only", "🔌 Custom", "plugin-only toolset")]
+        with self._with_plugin_toolsets(entries):
+            result = _get_effective_configurable_toolsets()
+
+        assert entries[0] in result
+
+    def test_keeps_builtin_row_even_when_no_plugin_extends_it(self):
+        with self._with_plugin_toolsets([]):
+            result = _get_effective_configurable_toolsets()
+
+        for builtin in CONFIGURABLE_TOOLSETS:
+            assert builtin in result
+
+    def test_mixed_overlap_and_unique_plugin_rows(self):
+        entries = [
+            ("web", "🔌 Web Plus", "dup — must be dropped"),
+            ("file", "🔌 File Plus", "dup — must be dropped"),
+            ("custom_a", "🔌 Custom A", "unique"),
+            ("custom_b", "🔌 Custom B", "unique"),
+        ]
+        with self._with_plugin_toolsets(entries):
+            result = _get_effective_configurable_toolsets()
+
+        keys = [row[0] for row in result]
+        assert keys.count("web") == 1
+        assert keys.count("file") == 1
+        assert "custom_a" in keys
+        assert "custom_b" in keys
+        # Order invariant: built-ins appear before unique plugin rows
+        # so the TUI still groups them predictably.
+        assert keys.index("web") < keys.index("custom_a")
