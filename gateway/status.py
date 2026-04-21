@@ -213,14 +213,26 @@ def _read_pid_record(pid_path: Optional[Path] = None) -> Optional[dict]:
 
 
 def _cleanup_invalid_pid_path(pid_path: Path, *, cleanup_stale: bool) -> None:
+    """Unlink a PID file whose record has already been proven stale.
+
+    Callers (``get_running_pid()``) invoke this only after verifying the
+    recorded PID is missing, malformed, dead, or no longer belongs to the
+    gateway (mismatched start-time / non-gateway cmdline). In every such
+    case the file is unambiguously garbage and should be removed so the
+    next ``write_pid_file()`` (which uses ``O_CREAT | O_EXCL``) can
+    succeed instead of failing with ``FileExistsError``.
+
+    ``remove_pid_file()`` is intentionally NOT used here: it refuses to
+    delete a record that doesn't match ``os.getpid()`` to protect the
+    ``--replace`` handoff. That guard makes the stale-cleanup path a
+    no-op after a SIGKILL/OOM crash, leaving the stale file behind and
+    sending the gateway into a systemd restart loop (see #13655).
+    """
     if not cleanup_stale:
         return
     try:
-        if pid_path == _get_pid_path():
-            remove_pid_file()
-        else:
-            pid_path.unlink(missing_ok=True)
-    except Exception:
+        pid_path.unlink(missing_ok=True)
+    except OSError:
         pass
 
 

@@ -87,6 +87,51 @@ class TestGatewayPidState:
 
         assert status.get_running_pid() == os.getpid()
 
+    def test_get_running_pid_cleans_up_stale_file_from_foreign_dead_pid(self, tmp_path, monkeypatch):
+        """Regression #13655: stale PID file from a crashed process (different
+        PID than ours, no longer alive) must be unlinked so the next
+        ``write_pid_file`` can succeed.
+
+        Before the fix, ``_cleanup_invalid_pid_path`` delegated to
+        ``remove_pid_file``, which refuses to delete a record whose PID
+        doesn't match ``os.getpid()``. The stale file survived, the next
+        gateway start hit ``FileExistsError`` from ``O_CREAT|O_EXCL``, and
+        systemd entered a restart loop until an operator cleaned up by hand.
+        """
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        pid_path = tmp_path / "gateway.pid"
+
+        # A record naming a dead process whose PID is NOT ours.
+        foreign_dead_pid = os.getpid() + 100000
+        pid_path.write_text(json.dumps({
+            "pid": foreign_dead_pid,
+            "kind": "hermes-gateway",
+            "argv": ["python", "-m", "hermes_cli.main", "gateway"],
+            "start_time": 123,
+        }))
+
+        def fake_kill(pid, sig):
+            raise ProcessLookupError  # simulate: process is gone
+
+        monkeypatch.setattr(status.os, "kill", fake_kill)
+
+        assert status.get_running_pid() is None
+        assert not pid_path.exists(), "stale PID file must be cleaned up"
+
+        # End-to-end: the next gateway start can now claim the PID file.
+        status.write_pid_file()
+        assert pid_path.exists()
+
+    def test_get_running_pid_cleans_up_file_with_malformed_record(self, tmp_path, monkeypatch):
+        """Malformed PID file (invalid JSON, no usable ``pid`` field) must
+        also be unlinked so the gateway doesn't wedge on a garbage file."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        pid_path = tmp_path / "gateway.pid"
+        pid_path.write_text("{this is not valid json")
+
+        assert status.get_running_pid() is None
+        assert not pid_path.exists()
+
     def test_get_running_pid_accepts_explicit_pid_path_without_cleanup(self, tmp_path, monkeypatch):
         other_home = tmp_path / "profile-home"
         other_home.mkdir()
