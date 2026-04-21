@@ -278,6 +278,92 @@ def _try_resolve_from_custom_pool(
         return None
 
 
+def _normalize_base_url_for_match(value: str) -> str:
+    """Normalize a base URL for equality comparison.
+
+    Strips surrounding whitespace and a single trailing slash. URL hostnames
+    are case-insensitive but paths may not be, so casing is preserved — any
+    mismatch there is treated as a deliberately different endpoint rather
+    than a near-miss we should paper over.
+    """
+    return (value or "").strip().rstrip("/")
+
+
+def _match_custom_provider_by_base_url(
+    base_url: str,
+    config: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Find a configured custom provider whose ``base_url`` equals *base_url*.
+
+    Used when the caller holds a generic ``provider="custom"`` identifier
+    but also knows the target endpoint. ACP sessions are the main case:
+    they persist ``{"provider": "custom", "base_url": ...}`` without the
+    ``custom:<name>`` menu key that interactive ``hermes`` flows generate,
+    so name-based lookup can't disambiguate them.
+
+    Matches are exact after ``_normalize_base_url_for_match``. No prefix /
+    host-only fuzzy matching so credentials never attach to a URL the
+    user didn't explicitly configure (see #13489).
+    """
+    target = _normalize_base_url_for_match(base_url)
+    if not target:
+        return None
+    if config is None:
+        config = load_config()
+
+    providers = config.get("providers")
+    if isinstance(providers, dict):
+        for ep_name, entry in providers.items():
+            if not isinstance(entry, dict):
+                continue
+            entry_url = (
+                entry.get("api") or entry.get("url") or entry.get("base_url") or ""
+            )
+            if not isinstance(entry_url, str):
+                continue
+            if _normalize_base_url_for_match(entry_url) != target:
+                continue
+            key_env = str(entry.get("key_env", "") or "").strip()
+            resolved_api_key = os.getenv(key_env, "").strip() if key_env else ""
+            if not resolved_api_key:
+                resolved_api_key = str(entry.get("api_key", "") or "").strip()
+            return {
+                "name": entry.get("name", ep_name),
+                "base_url": entry_url.strip(),
+                "api_key": resolved_api_key,
+                "model": entry.get("default_model", ""),
+            }
+
+    for entry in get_compatible_custom_providers(config) or []:
+        if not isinstance(entry, dict):
+            continue
+        entry_url = entry.get("base_url", "")
+        if not isinstance(entry_url, str):
+            continue
+        if _normalize_base_url_for_match(entry_url) != target:
+            continue
+        result = {
+            "name": str(entry.get("name", "") or "").strip(),
+            "base_url": entry_url.strip(),
+            "api_key": str(entry.get("api_key", "") or "").strip(),
+        }
+        key_env = str(entry.get("key_env", "") or "").strip()
+        if key_env:
+            result["key_env"] = key_env
+        provider_key = str(entry.get("provider_key", "") or "").strip()
+        if provider_key:
+            result["provider_key"] = provider_key
+        api_mode = _parse_api_mode(entry.get("api_mode"))
+        if api_mode:
+            result["api_mode"] = api_mode
+        model_name = str(entry.get("model", "") or "").strip()
+        if model_name:
+            result["model"] = model_name
+        return result
+
+    return None
+
+
 def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, Any]]:
     requested_norm = _normalize_custom_provider_name(requested_provider or "")
     if not requested_norm or requested_norm == "custom":
@@ -394,6 +480,15 @@ def _resolve_named_custom_runtime(
     explicit_base_url: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     custom_provider = _get_named_custom_provider(requested_provider)
+    if custom_provider is None and explicit_base_url:
+        # Name-based lookup can't help with a generic ``provider="custom"``
+        # identifier. ACP sessions persist exactly this shape
+        # (``{"provider": "custom", "base_url": ...}``) without the
+        # ``custom:<name>`` menu key that interactive flows generate, so
+        # fall back to matching the endpoint directly (#13489).
+        requested_norm = _normalize_custom_provider_name(requested_provider or "")
+        if requested_norm == "custom":
+            custom_provider = _match_custom_provider_by_base_url(explicit_base_url)
     if not custom_provider:
         return None
 

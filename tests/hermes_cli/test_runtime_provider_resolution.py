@@ -1499,3 +1499,144 @@ class TestOllamaUrlSubstringLeak:
         resolved = rp.resolve_runtime_provider(requested="custom")
 
         assert resolved["api_key"] == "ol-legit-key"
+
+
+class TestGenericCustomProviderBaseUrlMatch:
+    """Regression coverage for #13489.
+
+    ACP sessions persist ``{"provider": "custom", "base_url": "..."}`` and
+    need the runtime layer to resolve the configured credential by matching
+    base_url. Before the fix, ``_get_named_custom_provider("custom")`` bailed
+    early and the caller fell through to ``resolve_provider("custom")`` →
+    OpenRouter defaults → 401 from the real target endpoint.
+    """
+
+    DASHSCOPE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+    def _providers_dict_config(self):
+        return {
+            "providers": {
+                "dashscope": {
+                    "api": self.DASHSCOPE_URL,
+                    "api_key": "dashscope-sk",
+                    "default_model": "qwen-max",
+                    "name": "DashScope",
+                }
+            }
+        }
+
+    def _custom_providers_list_config(self):
+        return {
+            "custom_providers": [
+                {
+                    "name": "Local",
+                    "base_url": "http://localhost:8000/v1",
+                    "api_key": "local-key",
+                }
+            ]
+        }
+
+    def test_plain_custom_name_lookup_still_returns_none(self, monkeypatch):
+        """``_get_named_custom_provider`` keeps its name-only semantics —
+        generic ``"custom"`` is ambiguous and still resolves to None there."""
+        monkeypatch.setattr(rp, "load_config", self._providers_dict_config)
+
+        assert rp._get_named_custom_provider("custom") is None
+
+    def test_match_by_base_url_resolves_providers_dict_entry(self, monkeypatch):
+        """``_match_custom_provider_by_base_url`` picks the right entry in
+        the ``providers:`` dict form (new-style)."""
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        monkeypatch.setattr(rp, "load_config", self._providers_dict_config)
+
+        resolved = rp._match_custom_provider_by_base_url(self.DASHSCOPE_URL)
+
+        assert resolved is not None
+        assert resolved["api_key"] == "dashscope-sk"
+        assert resolved["base_url"] == self.DASHSCOPE_URL
+        assert resolved["model"] == "qwen-max"
+
+    def test_match_by_base_url_resolves_legacy_list_entry(self, monkeypatch):
+        """Legacy ``custom_providers`` list form is also matchable by URL."""
+        monkeypatch.setattr(rp, "load_config", self._custom_providers_list_config)
+
+        resolved = rp._match_custom_provider_by_base_url(
+            "http://localhost:8000/v1"
+        )
+
+        assert resolved is not None
+        assert resolved["api_key"] == "local-key"
+        assert resolved["name"] == "Local"
+
+    def test_match_by_base_url_normalises_trailing_slash(self, monkeypatch):
+        """``/`` at the URL tail must not break matching — users store URLs
+        both ways depending on which tool seeded the config."""
+        monkeypatch.setattr(rp, "load_config", self._providers_dict_config)
+
+        resolved = rp._match_custom_provider_by_base_url(self.DASHSCOPE_URL + "/")
+
+        assert resolved is not None
+        assert resolved["api_key"] == "dashscope-sk"
+
+    def test_match_by_base_url_returns_none_for_unconfigured_endpoint(
+        self, monkeypatch
+    ):
+        """Security invariant: a base_url that isn't in the config must NOT
+        return any credential. Otherwise a wrong-endpoint session could
+        leak a key that belongs to a different provider."""
+        monkeypatch.setattr(rp, "load_config", self._providers_dict_config)
+
+        resolved = rp._match_custom_provider_by_base_url(
+            "https://not-configured.example.com/v1"
+        )
+
+        assert resolved is None
+
+    def test_resolve_runtime_provider_matches_custom_by_base_url(self, monkeypatch):
+        """End-to-end: ``resolve_runtime_provider`` with
+        ``requested="custom"`` + ``explicit_base_url`` pointing at a saved
+        provider picks up that saved credential instead of falling through
+        to the OpenRouter default path."""
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.setattr(rp, "load_config", self._providers_dict_config)
+        monkeypatch.setattr(
+            rp,
+            "resolve_provider",
+            lambda *a, **k: (_ for _ in ()).throw(
+                AssertionError(
+                    "resolve_provider must not be reached when a saved "
+                    "custom provider matches by base_url"
+                )
+            ),
+        )
+
+        resolved = rp.resolve_runtime_provider(
+            requested="custom", explicit_base_url=self.DASHSCOPE_URL
+        )
+
+        assert resolved["provider"] == "custom"
+        assert resolved["api_key"] == "dashscope-sk"
+        assert resolved["base_url"] == self.DASHSCOPE_URL
+        assert resolved["requested_provider"] == "custom"
+
+    def test_match_by_base_url_resolves_key_env(self, monkeypatch):
+        """``providers:`` dict entries that store credentials via ``key_env``
+        must still resolve the env-var value when matched by base_url."""
+        monkeypatch.setenv("MY_DASHSCOPE_KEY", "env-based-secret")
+        config = {
+            "providers": {
+                "dashscope": {
+                    "api": self.DASHSCOPE_URL,
+                    "key_env": "MY_DASHSCOPE_KEY",
+                    "default_model": "qwen-plus",
+                    "name": "DashScope",
+                }
+            }
+        }
+        monkeypatch.setattr(rp, "load_config", lambda: config)
+
+        resolved = rp._match_custom_provider_by_base_url(self.DASHSCOPE_URL)
+
+        assert resolved is not None
+        assert resolved["api_key"] == "env-based-secret"
