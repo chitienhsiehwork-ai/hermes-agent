@@ -3095,6 +3095,13 @@ class GatewayRunner:
             self.session_store.update_session(
                 session_entry.session_key,
                 last_prompt_tokens=agent_result.get("last_prompt_tokens", 0),
+                input_tokens=agent_result.get("input_tokens", 0),
+                output_tokens=agent_result.get("output_tokens", 0),
+                cache_read_tokens=agent_result.get("cache_read_tokens", 0),
+                cache_write_tokens=agent_result.get("cache_write_tokens", 0),
+                total_tokens=agent_result.get("total_tokens", 0),
+                estimated_cost_usd=agent_result.get("estimated_cost_usd", 0.0),
+                cost_status=agent_result.get("cost_status"),
             )
 
             # Auto voice reply: send TTS audio before the text response
@@ -3431,6 +3438,8 @@ class GatewayRunner:
         verbose = "-v" in args or "--verbose" in args
         running_agent = self._running_agents.get(session_key)
 
+        input_tokens = max(0, int(getattr(session_entry, "input_tokens", 0) or 0))
+        output_tokens = max(0, int(getattr(session_entry, "output_tokens", 0) or 0))
         total_tokens = max(0, int(getattr(session_entry, "total_tokens", 0) or 0))
         cache_read = max(0, int(getattr(session_entry, "cache_read_tokens", 0) or 0))
         cache_write = max(0, int(getattr(session_entry, "cache_write_tokens", 0) or 0))
@@ -3456,10 +3465,15 @@ class GatewayRunner:
         if context_length > 0 and prompt_tokens > 0:
             pct = min(100, (prompt_tokens / context_length) * 100)
             summary_lines.append(f"🥐 {prompt_tokens:,} / {context_length:,} ({pct:.0f}%)")
+        elif prompt_tokens > 0:
+            summary_lines.append(f"🥐 {prompt_tokens:,} prompt tokens (context limit unknown)")
         elif total_tokens > 0:
-            summary_lines.append(f"🥐 ~{total_tokens:,} tokens in session")
+            summary_lines.append(f"🥐 {total_tokens:,} total tokens")
         else:
             summary_lines.append("🥐 no context data yet")
+
+        if input_tokens or output_tokens:
+            summary_lines.append(f"↳ input {input_tokens:,} · output {output_tokens:,} · total {total_tokens:,}")
 
         if cache_read or cache_write:
             summary_lines.append(f"💾 cache read {cache_read:,} · write {cache_write:,}")

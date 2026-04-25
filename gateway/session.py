@@ -810,8 +810,20 @@ class SessionStore:
         self,
         session_key: str,
         last_prompt_tokens: int = None,
+        input_tokens: int = None,
+        output_tokens: int = None,
+        cache_read_tokens: int = None,
+        cache_write_tokens: int = None,
+        total_tokens: int = None,
+        estimated_cost_usd: float = None,
+        cost_status: str = None,
     ) -> None:
-        """Update lightweight session metadata after an interaction."""
+        """Update lightweight session metadata after an interaction.
+
+        Token counts are absolute per-session totals reported by the agent,
+        not deltas. Passing ``None`` leaves a field unchanged; passing ``0``
+        intentionally resets it.
+        """
         with self._lock:
             self._ensure_loaded_locked()
 
@@ -820,6 +832,20 @@ class SessionStore:
                 entry.updated_at = _now()
                 if last_prompt_tokens is not None:
                     entry.last_prompt_tokens = last_prompt_tokens
+                if input_tokens is not None:
+                    entry.input_tokens = input_tokens
+                if output_tokens is not None:
+                    entry.output_tokens = output_tokens
+                if cache_read_tokens is not None:
+                    entry.cache_read_tokens = cache_read_tokens
+                if cache_write_tokens is not None:
+                    entry.cache_write_tokens = cache_write_tokens
+                if total_tokens is not None:
+                    entry.total_tokens = total_tokens
+                if estimated_cost_usd is not None:
+                    entry.estimated_cost_usd = estimated_cost_usd
+                if cost_status is not None:
+                    entry.cost_status = cost_status
                 self._save()
 
     def reset_session(self, session_key: str) -> Optional[SessionEntry]:

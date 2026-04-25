@@ -960,6 +960,46 @@ class TestLastPromptTokens:
         store.update_session("k1", last_prompt_tokens=0)
         assert entry.last_prompt_tokens == 0
 
+    def test_update_session_stores_api_usage_totals(self, tmp_path):
+        """update_session should persist API-reported token/cache totals for /cl."""
+        config = GatewayConfig()
+        with patch("gateway.session.SessionStore._ensure_loaded"):
+            store = SessionStore(sessions_dir=tmp_path, config=config)
+        store._loaded = True
+        store._db = None
+        store._save = MagicMock()
+
+        from gateway.session import SessionEntry
+        from datetime import datetime
+        entry = SessionEntry(
+            session_key="k1",
+            session_id="s1",
+            created_at=datetime.now(),
+            updated_at=datetime.now(),
+        )
+        store._entries = {"k1": entry}
+
+        store.update_session(
+            "k1",
+            last_prompt_tokens=12000,
+            input_tokens=12000,
+            output_tokens=800,
+            cache_read_tokens=9000,
+            cache_write_tokens=2000,
+            total_tokens=12800,
+            estimated_cost_usd=0.0123,
+            cost_status="priced",
+        )
+
+        assert entry.last_prompt_tokens == 12000
+        assert entry.input_tokens == 12000
+        assert entry.output_tokens == 800
+        assert entry.cache_read_tokens == 9000
+        assert entry.cache_write_tokens == 2000
+        assert entry.total_tokens == 12800
+        assert entry.estimated_cost_usd == 0.0123
+        assert entry.cost_status == "priced"
+
 class TestRewriteTranscriptPreservesReasoning:
     """rewrite_transcript must not drop reasoning fields from SQLite."""
 
