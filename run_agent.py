@@ -7713,6 +7713,42 @@ class AIAgent:
                     
                     # Track actual token usage from response for context management
                     if hasattr(response, 'usage') and response.usage:
+                        try:
+                            raw_usage_obj = response.usage
+                            if hasattr(raw_usage_obj, "model_dump"):
+                                raw_usage_shape = raw_usage_obj.model_dump()
+                            elif hasattr(raw_usage_obj, "dict"):
+                                raw_usage_shape = raw_usage_obj.dict()
+                            elif isinstance(raw_usage_obj, dict):
+                                raw_usage_shape = raw_usage_obj
+                            else:
+                                raw_usage_shape = {
+                                    name: getattr(raw_usage_obj, name)
+                                    for name in dir(raw_usage_obj)
+                                    if not name.startswith("_")
+                                    and isinstance(getattr(raw_usage_obj, name, None), (int, float, str, bool, type(None), dict))
+                                }
+
+                            def _numeric_shape(value):
+                                if isinstance(value, (int, float, str, bool)) or value is None:
+                                    return value
+                                if isinstance(value, dict):
+                                    return {
+                                        str(k): _numeric_shape(v)
+                                        for k, v in value.items()
+                                        if isinstance(v, (int, float, str, bool, type(None), dict))
+                                    }
+                                return type(value).__name__
+
+                            logger.debug(
+                                "Raw usage shape: provider=%s api_mode=%s usage=%s",
+                                self.provider or "unknown",
+                                self.api_mode or "unknown",
+                                _numeric_shape(raw_usage_shape),
+                            )
+                        except Exception:
+                            logger.debug("Failed to log raw usage shape", exc_info=True)
+
                         canonical_usage = normalize_usage(
                             response.usage,
                             provider=self.provider,
