@@ -82,6 +82,8 @@ class TestResolveCommand:
     def test_canonical_name_resolves(self):
         assert resolve_command("help").name == "help"
         assert resolve_command("background").name == "background"
+        assert resolve_command("quota").name == "quota"
+        assert resolve_command("cl").name == "cl"
 
     def test_alias_resolves_to_canonical(self):
         assert resolve_command("bg").name == "background"
@@ -215,6 +217,11 @@ class TestTelegramBotCommands:
             if cmd.cli_only and not cmd.gateway_config_gate:
                 tg_name = cmd.name.replace("-", "_")
                 assert tg_name not in names
+
+    def test_includes_gateway_compact_and_quota_commands(self):
+        names = {name for name, _ in telegram_bot_commands()}
+        assert "quota" in names
+        assert "cl" in names
 
 
 class TestSlackSubcommandMap:

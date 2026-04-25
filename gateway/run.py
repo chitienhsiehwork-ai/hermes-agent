@@ -502,6 +502,7 @@ class GatewayRunner:
         self._running_agents: Dict[str, Any] = {}
         self._running_agents_ts: Dict[str, float] = {}  # start timestamp per session
         self._pending_messages: Dict[str, str] = {}  # Queued messages during interrupt
+        self._quota_command_cache: Dict[str, Dict[str, Any]] = {}
 
         # Cache AIAgent instances per session to preserve prompt caching.
         # Without this, a new AIAgent is created per message, rebuilding the
@@ -1946,8 +1947,14 @@ class GatewayRunner:
                     del self._running_agents[_quick_key]
                 return await self._handle_reset_command(event)
 
+            # Telegram compatibility commands from OpenClaw: /q and /c.
+            if source.platform == Platform.TELEGRAM and event.get_command() == "q":
+                return await self._handle_quota_command(event)
+            if source.platform == Platform.TELEGRAM and event.get_command() == "c":
+                return await self._handle_cl_command(event)
+
             # /queue <prompt> — queue without interrupting
-            if event.get_command() in ("queue", "q"):
+            if event.get_command() == "queue":
                 queued_text = event.get_command_args().strip()
                 if not queued_text:
                     return "Usage: /queue <prompt>"
@@ -2032,9 +2039,16 @@ class GatewayRunner:
                 "args": event.get_command_args().strip(),
             })
 
-        # Resolve aliases to canonical name so dispatch only checks canonicals.
-        _cmd_def = _resolve_cmd(command) if command else None
-        canonical = _cmd_def.name if _cmd_def else command
+        # Telegram compatibility aliases from OpenClaw. Keep them local to
+        # Telegram so Hermes CLI and other platforms retain existing semantics.
+        if source.platform == Platform.TELEGRAM and command == "q":
+            canonical = "quota"
+        elif source.platform == Platform.TELEGRAM and command == "c":
+            canonical = "cl"
+        else:
+            # Resolve aliases to canonical name so dispatch only checks canonicals.
+            _cmd_def = _resolve_cmd(command) if command else None
+            canonical = _cmd_def.name if _cmd_def else command
 
         if canonical == "new":
             return await self._handle_reset_command(event)
@@ -2050,6 +2064,12 @@ class GatewayRunner:
 
         if canonical == "status":
             return await self._handle_status_command(event)
+
+        if canonical == "quota":
+            return await self._handle_quota_command(event)
+
+        if canonical == "cl":
+            return await self._handle_cl_command(event)
         
         if canonical == "stop":
             return await self._handle_stop_command(event)
@@ -3337,6 +3357,136 @@ class GatewayRunner:
             ]
 
         return "\n".join(lines)
+
+    def _resolve_usage_monitor_script(self) -> Path | None:
+        """Best-effort resolver for the local quota monitor script."""
+        candidates = [
+            Path("/home/clawd/clawd/scripts/usage-monitor.sh"),
+            Path.home() / "clawd" / "scripts" / "usage-monitor.sh",
+        ]
+        for candidate in candidates:
+            try:
+                if candidate.exists() and candidate.is_file():
+                    return candidate
+            except Exception:
+                continue
+        return None
+
+    async def _handle_quota_command(self, event: MessageEvent) -> str:
+        """Handle /quota (and Telegram compatibility alias /q)."""
+        source = event.source
+        session_key = self._session_key_for_source(source)
+        args = event.get_command_args().strip().split()
+        force_refresh = any(arg in {"--force", "-f"} for arg in args)
+        cache_ttl_seconds = 60
+        now = time.time()
+        cached = self._quota_command_cache.get(session_key)
+        if cached and not force_refresh and now - cached.get("ts", 0) < cache_ttl_seconds:
+            age = max(0, int(now - cached.get("ts", now)))
+            return f"{cached.get('output', '(no output)')}\n\n⚡ cached ({age}s ago) — /quota --force to refresh"
+
+        script_path = self._resolve_usage_monitor_script()
+        if script_path is None:
+            return "⚠️ Quota monitor script not found."
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "bash",
+                str(script_path),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env={
+                    **os.environ,
+                    "HOME": str(Path.home()),
+                    "TERM": "dumb",
+                    "NO_COLOR": "1",
+                },
+            )
+            try:
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.communicate()
+                return "⚠️ Quota check timed out (30s limit)"
+
+            text = (stdout or b"").decode("utf-8", errors="replace").strip()
+            if proc.returncode != 0:
+                detail = (stderr or b"").decode("utf-8", errors="replace").strip()
+                logger.error("/quota failed (%s): %s", proc.returncode, detail)
+                return "⚠️ Quota check failed"
+
+            output = text or "(no output)"
+            self._quota_command_cache[session_key] = {"output": output, "ts": now}
+            return output
+        except Exception as e:
+            logger.error("/quota error: %s", e, exc_info=True)
+            return "⚠️ Quota check failed"
+
+    async def _handle_cl_command(self, event: MessageEvent) -> str:
+        """Handle /cl (and Telegram compatibility alias /c)."""
+        source = event.source
+        session_key = self._session_key_for_source(source)
+        session_entry = self.session_store.get_or_create_session(source)
+        args = set(event.get_command_args().strip().split())
+        verbose = "-v" in args or "--verbose" in args
+        running_agent = self._running_agents.get(session_key)
+
+        total_tokens = max(0, int(getattr(session_entry, "total_tokens", 0) or 0))
+        cache_read = max(0, int(getattr(session_entry, "cache_read_tokens", 0) or 0))
+        cache_write = max(0, int(getattr(session_entry, "cache_write_tokens", 0) or 0))
+        running = bool(running_agent and running_agent is not _AGENT_PENDING_SENTINEL)
+
+        context_length = 0
+        prompt_tokens = int(getattr(session_entry, "last_prompt_tokens", 0) or 0)
+        api_calls = 0
+        compression_count = 0
+        if running:
+            try:
+                ctx = getattr(running_agent, "context_compressor", None)
+                context_length = int(getattr(ctx, "context_length", 0) or 0)
+                prompt_tokens = int(getattr(ctx, "last_prompt_tokens", prompt_tokens) or prompt_tokens)
+                compression_count = int(getattr(ctx, "compression_count", 0) or 0)
+                api_calls = int(getattr(running_agent, "session_api_calls", 0) or 0)
+                if total_tokens <= 0:
+                    total_tokens = int(getattr(running_agent, "session_total_tokens", 0) or 0)
+            except Exception:
+                logger.debug("Failed to read live context stats for /cl", exc_info=True)
+
+        summary_lines = []
+        if context_length > 0 and prompt_tokens > 0:
+            pct = min(100, (prompt_tokens / context_length) * 100)
+            summary_lines.append(f"🥐 {prompt_tokens:,} / {context_length:,} ({pct:.0f}%)")
+        elif total_tokens > 0:
+            summary_lines.append(f"🥐 ~{total_tokens:,} tokens in session")
+        else:
+            summary_lines.append("🥐 no context data yet")
+
+        if cache_read or cache_write:
+            summary_lines.append(f"💾 cache read {cache_read:,} · write {cache_write:,}")
+        else:
+            summary_lines.append("💾 no cache data")
+
+        if not verbose:
+            return "\n".join(summary_lines)
+
+        history = self.session_store.load_transcript(session_entry.session_id)
+        msg_count = len([
+            m for m in history
+            if m.get("role") in ("user", "assistant") and m.get("content")
+        ])
+        detail_lines = [*summary_lines, "", f"- session: {session_key}"]
+        detail_lines.append(f"- running: {'yes' if running else 'no'}")
+        detail_lines.append(f"- messages: {msg_count}")
+        if total_tokens > 0:
+            detail_lines.append(f"- session tokens: {total_tokens:,}")
+        if api_calls > 0:
+            detail_lines.append(f"- API calls: {api_calls}")
+        if compression_count > 0:
+            detail_lines.append(f"- compressions: {compression_count}")
+        detail_lines.append(
+            f"- updated: {session_entry.updated_at.strftime('%Y-%m-%d %H:%M')}"
+        )
+        return "\n".join(detail_lines)
 
     async def _handle_status_command(self, event: MessageEvent) -> str:
         """Handle /status command."""

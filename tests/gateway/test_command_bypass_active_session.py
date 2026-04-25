@@ -160,6 +160,19 @@ class TestCommandBypassActiveSession:
         assert sk not in adapter._pending_messages
         assert any("handled:status" in r for r in adapter.sent_responses)
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("command", ["quota", "q", "cl", "c"])
+    async def test_zero_ai_status_commands_bypass_guard(self, command):
+        """Quota/context commands must answer immediately even during a run."""
+        adapter = _make_adapter()
+        sk = _session_key()
+        adapter._active_sessions[sk] = asyncio.Event()
+
+        await adapter.handle_message(_make_event(f"/{command}"))
+
+        assert sk not in adapter._pending_messages
+        assert any(f"handled:{command}" in r for r in adapter.sent_responses)
+
 
 # ---------------------------------------------------------------------------
 # Tests: non-bypass messages still get queued
