@@ -3441,6 +3441,8 @@ class GatewayRunner:
         input_tokens = max(0, int(getattr(session_entry, "input_tokens", 0) or 0))
         output_tokens = max(0, int(getattr(session_entry, "output_tokens", 0) or 0))
         total_tokens = max(0, int(getattr(session_entry, "total_tokens", 0) or 0))
+        if total_tokens <= 0 and (input_tokens or output_tokens):
+            total_tokens = input_tokens + output_tokens
         cache_read = max(0, int(getattr(session_entry, "cache_read_tokens", 0) or 0))
         cache_write = max(0, int(getattr(session_entry, "cache_write_tokens", 0) or 0))
         running = bool(running_agent and running_agent is not _AGENT_PENDING_SENTINEL)

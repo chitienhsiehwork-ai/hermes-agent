@@ -55,3 +55,26 @@ async def test_cl_command_reports_api_usage_from_session_store():
     assert "input 12,000 · output 800 · total 12,800" in result
     assert "cache read 9,000 · write 2,000" in result
     assert "no context data yet" not in result
+
+
+@pytest.mark.asyncio
+async def test_cl_command_falls_back_total_to_input_plus_output():
+    """Some providers return input/output but omit total; /cl should not show total 0."""
+    source = SessionSource(platform=Platform.TELEGRAM, chat_id="12345", chat_type="dm")
+    key = build_session_key(source, group_sessions_per_user=True, thread_sessions_per_user=False)
+    entry = SessionEntry(
+        session_key=key,
+        session_id="s1",
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+        input_tokens=454104,
+        output_tokens=576,
+        total_tokens=0,
+        last_prompt_tokens=152420,
+    )
+    runner = _make_runner(entry)
+
+    result = await runner._handle_cl_command(_make_event("/cl"))
+
+    assert "input 454,104 · output 576 · total 454,680" in result
+    assert "total 0" not in result
