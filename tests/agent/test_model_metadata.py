@@ -127,6 +127,9 @@ class TestDefaultContextLengths:
             if "gpt-4.1" in key:
                 assert value == 1047576, f"{key} should be 1047576"
 
+    def test_gpt55_model_1050k(self):
+        assert DEFAULT_CONTEXT_LENGTHS["gpt-5.5"] == 1050000
+
     def test_gemini_models_1m(self):
         for key, value in DEFAULT_CONTEXT_LENGTHS.items():
             if "gemini" in key:
